@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Google Doc downloader.
+"""Google Doc downloader + hours summary generator.
 
-Fetches a Google Docs document by ID and prints it to stdout or saves it to a file.
+Fetches a Google Docs document by ID and can:
+- print table rows as text
+- print raw Docs API JSON
+- print a parsed hours summary JSON for the tracker website
 """
 
 from __future__ import annotations
@@ -9,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -20,6 +24,11 @@ from googleapiclient.discovery import build
 SCOPES = ["https://www.googleapis.com/auth/documents.readonly"]
 DEFAULT_CREDENTIALS = "credentials.json"
 DEFAULT_TOKEN = "token.json"
+TERM_KEYS = {
+    "fall 2025": "fall_2025",
+    "winter 2026": "winter_2026",
+    "spring 2026": "spring_2026",
+}
 
 
 def get_docs_service(credentials_path: str = DEFAULT_CREDENTIALS, token_path: str = DEFAULT_TOKEN):
@@ -97,15 +106,55 @@ def get_document_text(document: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def parse_hours(lines: list[str]) -> dict:
+    term_totals = {key: 0.0 for key in TERM_KEYS.values()}
+    task_rows: list[dict] = []
+
+    for raw in lines:
+        cols = [col.strip() for col in raw.split("\t") if col.strip()]
+        if not cols:
+            continue
+
+        row_text = " ".join(cols).lower()
+        hours_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\b", row_text)
+
+        term_key = next((mapped for term, mapped in TERM_KEYS.items() if term in row_text), None)
+        if term_key and hours_match:
+            term_totals[term_key] += float(hours_match.group(1))
+
+        numeric_values = [float(value) for value in re.findall(r"\b\d+(?:\.\d+)?\b", raw)]
+        if numeric_values and len(cols) >= 2:
+            task_rows.append(
+                {
+                    "task": cols[0],
+                    "details": cols[1:-1],
+                    "hours": numeric_values[-1],
+                    "raw": raw,
+                }
+            )
+
+    completed_hours = sum(term_totals.values())
+    goal_hours = 400
+    remaining_hours = max(goal_hours - completed_hours, 0)
+
+    return {
+        "goal_hours": goal_hours,
+        "term_totals": term_totals,
+        "completed_hours": round(completed_hours, 2),
+        "remaining_hours": round(remaining_hours, 2),
+        "tasks": task_rows,
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Download and print a Google Docs document.")
     parser.add_argument("doc_id", help="Google Doc ID from the document URL.")
     parser.add_argument("--output", "-o", help="Write output to a file instead of stdout.")
     parser.add_argument(
         "--format",
-        choices=["text", "json"],
+        choices=["text", "json", "summary"],
         default="text",
-        help="Output format: plain text or raw JSON from the Google Docs API.",
+        help="Output format: plain text, raw JSON from the Google Docs API, or parsed hours summary JSON.",
     )
     parser.add_argument(
         "--credentials",
@@ -135,6 +184,9 @@ def main() -> int:
 
     if args.format == "json":
         output_data = json.dumps(document, indent=2, ensure_ascii=False)
+    elif args.format == "summary":
+        lines = extract_table_text(document.get("body", {}).get("content", []))
+        output_data = json.dumps(parse_hours(lines), indent=2, ensure_ascii=False)
     else:
         output_data = get_document_text(document)
 
