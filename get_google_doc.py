@@ -56,40 +56,45 @@ def read_paragraph(paragraph: dict) -> str:
     return "".join(read_paragraph_element(el) for el in paragraph.get("elements", []))
 
 
-def process_structural_elements(elements: list[dict]) -> str:
-    lines: list[str] = []
-    for element in elements:
+def read_table_cell(cell: dict) -> str:
+    segments: list[str] = []
+    for element in cell.get("content", []):
         if "paragraph" in element:
-            paragraph = element["paragraph"]
-            text = read_paragraph(paragraph).rstrip("\n")
+            text = read_paragraph(element["paragraph"]).replace("\n", " ").strip()
             if text:
-                if paragraph.get("bullet"):
-                    lines.append(f"- {text}")
-                else:
-                    lines.append(text)
-            else:
-                lines.append("")
+                segments.append(text)
         elif "table" in element:
-            table = element["table"]
-            for row in table.get("tableRows", []):
-                row_text = []
-                for cell in row.get("tableCells", []):
-                    cell_text = process_structural_elements(cell.get("content", []))
-                    row_text.append(cell_text.replace("\n", " ").strip())
-                lines.append("\t".join(row_text))
-            lines.append("")
+            nested_rows = read_table_rows(element["table"])
+            if nested_rows:
+                segments.append(" | ".join(nested_rows))
+    return " ".join(segments).strip()
+
+
+def read_table_rows(table: dict) -> list[str]:
+    rows: list[str] = []
+    for row in table.get("tableRows", []):
+        row_cells = [read_table_cell(cell) for cell in row.get("tableCells", [])]
+        rows.append("\t".join(row_cells).strip())
+    return [row for row in rows if row]
+
+
+def extract_table_text(elements: list[dict]) -> list[str]:
+    table_lines: list[str] = []
+    for element in elements:
+        if "table" in element:
+            table_lines.extend(read_table_rows(element["table"]))
         elif "tableOfContents" in element:
-            toc = element["tableOfContents"]
-            lines.append(process_structural_elements(toc.get("content", [])))
-        else:
-            continue
-    return "\n".join(lines).strip() + "\n"
+            table_lines.extend(extract_table_text(element["tableOfContents"].get("content", [])))
+    return table_lines
 
 
 def get_document_text(document: dict) -> str:
     body = document.get("body", {})
     content = body.get("content", [])
-    return process_structural_elements(content)
+    lines = extract_table_text(content)
+    if not lines:
+        return ""
+    return "\n".join(lines) + "\n"
 
 
 def parse_args() -> argparse.Namespace:
